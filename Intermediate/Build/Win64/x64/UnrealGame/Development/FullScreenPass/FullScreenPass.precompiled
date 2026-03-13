@@ -1,0 +1,8 @@
+{
+	"OutputFiles": [
+		"FullScreenPassLog.cpp.obj",
+		"FullScreenPassModule.cpp.obj",
+		"FullScreenPassSceneViewExtension.cpp.obj",
+		"FullScreenPassShaders.cpp.obj"
+	]
+}

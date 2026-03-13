@@ -1,0 +1,144 @@
+#include "Common.ush"
+#include "SceneTexturesCommon.ush"
+
+/*=============================================================================
+	Preprocessor settings
+=============================================================================*/
+
+/*=============================================================================
+	UI Uniforms
+=============================================================================*/
+
+uniform float SharpenStrength;
+uniform bool DepthMaskEnable;     
+uniform bool RMSMaskEnable;       
+uniform int SharpenMode;          //0 = Chroma, 1 = Luma
+
+/*=============================================================================
+	Textures, Samplers, Globals
+=============================================================================*/
+
+/*=============================================================================
+	Vertex Shader
+=============================================================================*/
+
+struct FVertexOutput
+{
+	float4                  vpos        : SV_POSOTION;
+    float2                  uv          : TEXCOORD0;
+};
+
+void SharpenVS(
+    in uint id : SV_VertexID,
+    out FVertexOutput o)
+{
+    o.uv.x = (id == 2) ? 2.0 : 0.0;
+    o.uv.y = (id == 1) ? 2.0 : 0.0;
+
+    o.vpos = float4(o.uv.xy * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+
+/*=============================================================================
+	Functions
+=============================================================================*/
+
+float Color_to_lum(float3 color)
+{
+    return dot(color, float3(0.3, 0.59, 0.11));
+}
+
+float3 Blend_overlay(float3 a, float3 b)
+{
+    float3 c = 1.0 - a;
+    float3 d = 1.0 - b;
+
+    return a < 0.5 ? (2.0 * a * b) : (1.0 - 2.0 * c * d);
+}
+
+float4 FetchColorAndDepth(float2 UV, float2 PixelSize)
+{
+	float4 Result;
+	
+	// Sample scene color
+	Result.rgb = SceneTextureLookup(UV, EYE_TEXTURE_SCENE_COLOR, false).rgb;
+	
+	// Get linear depth
+	float DeviceZ = SceneTextureLookup(UV, EYE_TEXTURE_SCENE_DEPTH, false).r;
+	float LinearDepth = ConvertFromDeviceZ(DeviceZ);
+	Result.a = LinearDepth;
+	
+	return Result;
+}
+
+/*=============================================================================
+	Pixel Shaders
+=============================================================================*/
+
+void SharpenPS(
+    in FVertexOutput i, 
+    out float3 o : SV_Target0)
+{
+    //  A B C
+    //  D E F           
+    //  G H I
+
+    float4 A, B, C, D, E, F, G, H, I;
+
+    float2 pixelSize = GetResolvedView().BufferedViewSize.zw;
+
+    float3 offsets = float3(1, 0, -1);
+    
+    A = FetchColorAndDepth(i.UV + offsets.zz * pixelSize, pixelSize);
+	B = FetchColorAndDepth(i.UV + offsets.yz * pixelSize, pixelSize);
+	C = FetchColorAndDepth(i.UV + offsets.xz * pixelSize, pixelSize);
+	D = FetchColorAndDepth(i.UV + offsets.zy * pixelSize, pixelSize);
+	E = FetchColorAndDepth(i.UV + offsets.yy * pixelSize, pixelSize);
+	F = FetchColorAndDepth(i.UV + offsets.xy * pixelSize, pixelSize);
+	G = FetchColorAndDepth(i.UV + offsets.zx * pixelSize, pixelSize);
+	H = FetchColorAndDepth(i.UV + offsets.yx * pixelSize, pixelSize);
+	I = FetchColorAndDepth(i.UV + offsets.xx * pixelSize, pixelSize);
+
+    float4 corners = (A + C) + (G + I);
+    float4 neighbours = (B + D) + (F + H);
+    float4 center = E;
+
+    float4 edge = corners + 2.0 * neighbours - 12.0 * center;
+    float3 sharpen = edge.rgb;
+
+    //measures root mean square as local contrast measurement
+    //to adjust the intensity of the sharpener at edges with 
+    //high local contrast to restrict sharpen to texture detail
+    //only while leaving object and detail outlines mostly alone.
+    [branch]
+	if (RMSMaskEnable)
+	{
+		float3 Mean = (corners.rgb + neighbours.rgb + center.rgb) / 9.0;
+		float3 RMS = (Mean - A.rgb) * (Mean - A.rgb);
+		RMS += (Mean - B.rgb) * (Mean - B.rgb);
+		RMS += (Mean - C.rgb) * (Mean - C.rgb);
+		RMS += (Mean - D.rgb) * (Mean - D.rgb);
+		RMS += (Mean - E.rgb) * (Mean - E.rgb);
+		RMS += (Mean - F.rgb) * (Mean - F.rgb);
+		RMS += (Mean - G.rgb) * (Mean - G.rgb);
+		RMS += (Mean - H.rgb) * (Mean - H.rgb);
+		RMS += (Mean - I.rgb) * (Mean - I.rgb);
+		
+		sharpen *= rsqrt(RMS + 0.001) * 0.1;
+	}
+
+    //Remove sharpen completely from depth edges, as these never look good
+    //with any kind of sharpening and always create exaggerated halos that
+    //ruin any strong sharpening which would otherwise enhance textures
+    sharpen *= DEPTH_MASK_ENABLE ? saturate(1.0 - abs(edge.w) * 4000.0) : 1.0;
+
+    //grayscale sharpen mask, helps if some color artifacts arise, red-blue
+    //is mostly prone to create weirdly colored spots.
+    if(SharpenMode == 1) 
+        sharpen = Color_to_lum(sharpen);
+
+    sharpen = -sharpen * SharpenStrength * 0.1;
+    //smooth falloff, cheaper than pow() with little error    
+    sharpen = sign(sharpen) * log(abs(sharpen) * 10.0 + 1.0)*0.3; 
+
+    o = Blend_overlay(center.rgb, (0.5 + sharpen));
+}

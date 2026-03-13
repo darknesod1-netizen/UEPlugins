@@ -1,0 +1,23 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Full Screen Sharpen",
+	"Description": "Modified full screen pass plugin with added sharpen shader",
+	"Category": "Graphics",
+	"CreatedBy": "Daniil Ostrovskij",
+	"CreatedByURL": "t.me/darknesod",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"EngineVersion": "5.7.0",
+	"CanContainContent": true,
+	"Installed": true,
+	"Modules": [
+		{
+			"Name": "FullScreenPass",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		}
+	]
+}
