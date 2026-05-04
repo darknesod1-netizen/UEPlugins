@@ -1,25 +1,108 @@
-
 #include "/Engine/Private/Common.ush"
 #include "/Engine/Private/SceneTexturesCommon.ush"
 
-
-float Strenght;
+float SharpStrength;
+int DepthMaskEnable;
+int RmsMaskEnable;
+int SharpenMode;
 
 void MainVS(
-	in float4 InPosition : ATTRIBUTE0,
-	in float2 InTexCoord : ATTRIBUTE1,
-	out noperspective float4 OutUVAndScreenPos : TEXCOORD0,
-	out float4 OutPosition : SV_POSITION)
+    in float4 InPosition : ATTRIBUTE0,
+    in float2 InTexCoord : ATTRIBUTE1,
+    out noperspective float4 OutUVAndScreenPos : TEXCOORD0,
+    out float4 OutPosition : SV_POSITION)
 {
-	DrawRectangle(InPosition, InTexCoord, OutPosition, OutUVAndScreenPos);
+    DrawRectangle(InPosition, InTexCoord, OutPosition, OutUVAndScreenPos);
+}
+
+float color_to_lum(float3 color)
+{
+    return dot(color, float3(0.3, 0.59, 0.11));
+}
+
+float3 blend_overlay(float3 a, float3 b)
+{
+    float3 c = 1.0 - a;
+    float3 d = 1.0 - b;
+    return select(a < 0.5, (2.0 * a * b), (1.0 - 2.0 * c * d));
+}
+
+// Compress HDR linear scene color into [0,1) so the sharpen math,
+// which was designed for an LDR backbuffer, behaves correctly.
+float3 tonemap(float3 c)
+{
+    return c / (1.0 + c);
+}
+
+float3 inv_tonemap(float3 c)
+{
+    return c / max(1.0 - c, 0.001);
+}
+
+float4 fetch_color_and_depth(float2 uv)
+{
+    float4 result = CalcSceneColorAndDepth(uv);
+    result.rgb = tonemap(max(result.rgb, 0.0));
+    // Normalize depth so the depth-edge multiplier (4000) behaves like in
+    // the original ReShade port, where depth was in [0,1].
+    result.w *= 0.00001;
+    return result;
 }
 
 float4 MainPS(
-	noperspective float4 UVAndScreenPos : TEXCOORD0
-	) : SV_Target0
+    noperspective float4 UVAndScreenPos : TEXCOORD0
+    ) : SV_Target0
 {
-	float2 uv = UVAndScreenPos.xy;
-    float4 res = CalcSceneColorAndDepth(uv);
-	
-    return saturate(float4(lerp(res.xyz, res.www*0.00001f, saturate(Strenght)), 1.f));
+    float2 uv = UVAndScreenPos.xy;
+    float2 PixelSize = View.BufferSizeAndInvSize.zw;
+
+    //  A B C
+    //  D E F
+    //  G H I
+    float4 A, B, C, D, E, F, G, H, I;
+    float3 offsets = float3(1, 0, -1);
+
+    A = fetch_color_and_depth(uv + offsets.zz * PixelSize);
+    B = fetch_color_and_depth(uv + offsets.yz * PixelSize);
+    C = fetch_color_and_depth(uv + offsets.xz * PixelSize);
+    D = fetch_color_and_depth(uv + offsets.zy * PixelSize);
+    E = fetch_color_and_depth(uv + offsets.yy * PixelSize);
+    F = fetch_color_and_depth(uv + offsets.xy * PixelSize);
+    G = fetch_color_and_depth(uv + offsets.zx * PixelSize);
+    H = fetch_color_and_depth(uv + offsets.yx * PixelSize);
+    I = fetch_color_and_depth(uv + offsets.xx * PixelSize);
+
+    float4 corners    = (A + C) + (G + I);
+    float4 neighbours = (B + D) + (F + H);
+    float4 center     = E;
+    float4 edge       = corners + 2.0 * neighbours - 12.0 * center;
+    float3 sharpen    = edge.rgb;
+
+    [branch]
+    if (RmsMaskEnable != 0)
+    {
+        float3 mean = (corners.rgb + neighbours.rgb + center.rgb) / 9.0;
+        float3 RMS  = (mean - A.rgb) * (mean - A.rgb);
+        RMS += (mean - B.rgb) * (mean - B.rgb);
+        RMS += (mean - C.rgb) * (mean - C.rgb);
+        RMS += (mean - D.rgb) * (mean - D.rgb);
+        RMS += (mean - E.rgb) * (mean - E.rgb);
+        RMS += (mean - F.rgb) * (mean - F.rgb);
+        RMS += (mean - G.rgb) * (mean - G.rgb);
+        RMS += (mean - H.rgb) * (mean - H.rgb);
+        RMS += (mean - I.rgb) * (mean - I.rgb);
+        sharpen *= rsqrt(RMS + 0.001) * 0.1;
+    }
+
+    sharpen *= (DepthMaskEnable != 0) ? saturate(1.0 - abs(edge.w) * 4000.0) : 1.0;
+
+    if (SharpenMode == 1)
+        sharpen = color_to_lum(sharpen);
+
+    sharpen = -sharpen * SharpStrength * 0.1;
+    sharpen = sign(sharpen) * log(abs(sharpen) * 10.0 + 1.0) * 0.3;
+
+    float3 ldr_result = saturate(blend_overlay(center.rgb, (0.5 + sharpen)));
+    float3 hdr_result = inv_tonemap(ldr_result);
+    return float4(hdr_result, 1.0);
 }
